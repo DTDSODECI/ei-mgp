@@ -1,0 +1,690 @@
+import type { Metadata } from 'next'
+import { notFound } from 'next/navigation'
+import { EtiquetteStatut, type TonStatut } from '@/components/ui/etiquette-statut'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { prisma } from '@/lib/prisma'
+import { exigerUtilisateur } from '@/server/auth'
+import {
+  acteursDeLEtape,
+  aPermission,
+  peutChangerStatutDossier,
+  peutCloturerDossier,
+  peutCreerInvestigation,
+  peutModifierInvestigation,
+  peutReouvrirDossier,
+  peutVoirInvestigation,
+  peutCloturerAction,
+  peutCreerAction,
+  peutEnvoyerMessage,
+  peutVoirMessagerie,
+  peutModifierAction,
+  peutVerifierEfficacite,
+  peutVoirAction,
+} from '@/server/authz'
+import {
+  actionsDuDossier,
+  investigationsRattachables,
+} from '@/server/services/action-corrective/action-corrective'
+import { investigationsDuDossier } from '@/server/services/investigation/investigation'
+import { marquerMessagesLus, messagesDuDossier } from '@/server/services/messagerie/messagerie'
+import {
+  affectationsActives,
+  chargerFiche,
+  historiqueDossier,
+  piecesJointesDossier,
+} from '@/server/services/dossier/fiche'
+import { dateLimiteGlobale, joursRestants } from '@/server/services/dossier/delais'
+import { libelleValeur } from '@/server/services/declaration/parcours-config'
+import type { ParcoursCode } from '@/server/authz'
+import {
+  estEvenementIndesirable,
+  personnesEnCharge,
+  suiviEi,
+} from '@/server/services/dossier/suivi-ei'
+import { transitionsManuelles } from '@/server/services/dossier/workflow'
+import { FilAriane } from '@/components/layout/fil-ariane'
+import { SommaireDossier, type SectionDossier } from './sommaire'
+import { BlocSuiviEi } from './bloc-suivi-ei'
+import { PanneauActions } from './panneau-actions'
+import { PanneauInvestigations } from './panneau-investigations'
+import { PanneauActionsCorrectives } from './panneau-actions-correctives'
+import { PanneauMessagerie } from './panneau-messagerie'
+import { PanneauPiecesJointes } from './panneau-pieces-jointes'
+import { famillesRisqueProposees } from '@/server/services/dossier/famille-risque'
+
+export const metadata: Metadata = { title: 'Dossier' }
+
+const dateFr = (d: Date | null) =>
+  d ? new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long', timeStyle: 'short' }).format(d) : '—'
+
+const dateCourteFr = (d: Date | null) =>
+  d ? new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long' }).format(d) : '—'
+
+/** Échelle de gravité 1-4 (CDC §11.1) : seul le palier haut passe en alerte. */
+function tonGravite(niveau: number): TonStatut {
+  if (niveau >= 4) return 'alerte'
+  if (niveau === 3) return 'attention'
+  return 'neutre'
+}
+
+export default async function PageDossier({ params }: PageProps<'/dossiers/[id]'>) {
+  const { id } = await params
+  const utilisateur = await exigerUtilisateur()
+
+  const dossier = await chargerFiche(utilisateur, id)
+
+  // `chargerFiche` renvoie `null` aussi bien pour un dossier inexistant que pour un dossier hors
+  // périmètre : ne pas distinguer les deux, cette distinction révélerait son existence.
+  if (!dossier) {
+    notFound()
+  }
+
+  const pourPolicy = {
+    parcoursCode: dossier.parcours.code as Parameters<typeof peutChangerStatutDossier>[1]['parcoursCode'],
+    statutCode: dossier.statutCode,
+    isAnonymous: dossier.is_anonymous,
+    declarantUserId: dossier.declarant_user_id,
+    siteId: dossier.site_id,
+    directionId: dossier.direction_id,
+    estAffecteAuLecteur: dossier.estAffecteAuLecteur,
+  }
+
+  const [
+    historique,
+    affectations,
+    pieces,
+    transitions,
+    restants,
+    limiteGlobale,
+    investigations,
+    actions,
+    investigationsRattachables_,
+    messages,
+    gravitesActives,
+    famillesRisque,
+    suivi,
+    enCharge,
+    acteursAttendus,
+  ] = await Promise.all([
+    historiqueDossier(id),
+    affectationsActives(id),
+    piecesJointesDossier(id),
+    peutChangerStatutDossier(utilisateur, pourPolicy)
+      ? transitionsManuelles(dossier.statutCode)
+      : Promise.resolve([]),
+    joursRestants({ id, statutCode: dossier.statutCode, parcoursId: dossier.parcours.id }),
+    dateLimiteGlobale({ parcoursId: dossier.parcours.id, creeLe: dossier.created_at ?? new Date() }),
+    investigationsDuDossier(id),
+    actionsDuDossier(id),
+    investigationsRattachables(id),
+    peutVoirMessagerie(utilisateur, { parcoursCode: pourPolicy.parcoursCode })
+      ? messagesDuDossier(id)
+      : Promise.resolve([]),
+    // Niveaux proposés à la qualification. Chargés sans condition : l'alternative serait une
+    // seconde requête conditionnelle, pour six lignes.
+    prisma.niveaux_gravite.findMany({
+      where: { actif: true },
+      orderBy: { niveau: 'asc' },
+      select: { id: true, libelle: true },
+    }),
+
+    /*
+      Familles de risque proposées au traitement — neuf lignes, même raisonnement.
+
+      ⚠️ SELON LE TYPE depuis le 2026-09-21 : l'évènement indésirable n'en relève pas, et la liste
+      revient vide. La carte disparaît alors de la fiche — la question ne se pose plus, plutôt que
+      de se poser sans réponse possible. Ce qui est déjà posé reste affiché plus bas.
+    */
+    famillesRisqueProposees(pourPolicy.parcoursCode),
+    // Le suivi n'est chargé que pour le parcours qui l'affiche : deux requêtes épargnées sur
+    // les trois quarts des fiches.
+    estEvenementIndesirable(pourPolicy.parcoursCode) ? suiviEi(id) : Promise.resolve(null),
+
+    /*
+      ⚠️ QUI RÉPOND DE CE DOSSIER — pour les QUATRE types, désormais.
+
+      Plus aucune déclaration n'est affectée : la charge se déduit de l'habilitation du rôle sur
+      ce type et du rattachement. C'était vrai des seuls évènements indésirables jusqu'au
+      2026-09-20 ; ça l'est des griefs depuis.
+    */
+    personnesEnCharge({
+      parcoursCode: pourPolicy.parcoursCode,
+      siteId: dossier.site_id,
+      directionId: dossier.direction_id,
+      // DT-06 : le déclarant identifié n'instruit pas son propre dossier.
+      declarantUserId: dossier.declarant_user_id,
+    }),
+
+    /*
+      À QUI REVIENT CETTE ÉTAPE — lu dans `role_etapes`, plus dans une table du code.
+
+      Sert uniquement à expliquer le refus : « cette étape revient à … ». Le contrôle, lui,
+      est fait par `peutChangerStatutDossier()` juste en dessous, et sur les étapes résolues
+      du compte — jamais sur cette liste, qui n'est qu'un message.
+    */
+    acteursDeLEtape(pourPolicy.parcoursCode, dossier.statutCode),
+  ])
+
+  // Les policies s'evaluent ICI, cote serveur : le composant client ne recoit que des booleens
+  // deja calcules, jamais de quoi les recalculer lui-meme.
+  const contexteParcours = { parcoursCode: pourPolicy.parcoursCode }
+  const investigationsVues = peutVoirInvestigation(utilisateur, {
+    ...contexteParcours,
+    enqueteurId: 0n,
+  })
+    ? investigations.map((i) => ({
+        id: i.id,
+        dateOuverture: i.date_ouverture.toISOString(),
+        faitsConstates: i.faits_constates,
+        personnesRencontrees: i.personnes_rencontrees,
+        causeImmediate: i.cause_immediate,
+        causesRacines: i.causes_racines,
+        recommandations: i.recommandations,
+        enqueteur: i.users_investigations_enqueteur_idTousers.name,
+        peutModifier: peutModifierInvestigation(utilisateur, {
+          ...contexteParcours,
+          enqueteurId: i.enqueteur_id,
+        }),
+      }))
+    : []
+
+  const droitsActions = {
+    creer: peutCreerAction(utilisateur, contexteParcours),
+    modifier: peutModifierAction(utilisateur, contexteParcours),
+    verifier: peutVerifierEfficacite(utilisateur, contexteParcours),
+    cloturer: peutCloturerAction(utilisateur, contexteParcours),
+  }
+
+  const actionsVues = peutVoirAction(utilisateur, contexteParcours)
+    ? actions.map((a) => ({
+        id: a.id,
+        intitule: a.intitule,
+        description: a.description,
+        echeance: a.echeance.toISOString(),
+        statut: a.statut,
+        verificationEfficacite: a.verification_efficacite,
+        verificationCommentaire: a.verification_commentaire,
+        dateCloture: a.date_cloture?.toISOString() ?? null,
+        // Saisi à la main depuis le 2026-09-18. Le repli sur le compte couvre les actions plus
+        // anciennes, qui désignaient un utilisateur.
+        responsable: a.responsable_nom ?? a.users?.name ?? '—',
+      }))
+    : []
+
+  // Parité avec `MessagerieDossier::mount()` : ouvrir le dossier vaut lecture des messages du
+  // déclarant. C'est une écriture pendant le rendu, assumée — la page est dynamique (elle lit la
+  // session) et l'opération est idempotente : la relire ne change plus rien.
+  if (messages.length > 0) {
+    await marquerMessagesLus(id, 'agent')
+  }
+
+  const messagesVus = messages.map((m) => ({
+    id: m.id,
+    cote: m.expediteur_type === 'agent' ? ('agent' as const) : ('declarant' as const),
+    auteur: m.expediteur_type === 'agent' ? (m.users?.name ?? 'Agent') : 'Déclarant',
+    corps: m.corps,
+    envoyeLe: (m.created_at ?? new Date()).toISOString(),
+  }))
+
+  // Le sommaire ne liste que les sections réellement présentes : proposer « Identité du
+  // déclarant » sur un dossier anonyme mènerait à une ancre vide.
+  /*
+    Le rattachement n'est montré que s'il y a quelque chose à montrer.
+
+    ⚠️ Calculé UNE fois, et partagé par le sommaire et la section. Deux conditions écrites
+    séparément auraient fini par diverger, et l'entrée du sommaire aurait pointé vers une ancre
+    absente — un lien qui ne fait rien.
+  */
+  /*
+    ⚠️ RIEN DU DÉCLARANT SUR UNE DÉCLARATION ANONYME.
+
+    Le poste et la direction du déclarant ne sont plus demandés sous couvert d'anonymat — le
+    formulaire les masque —, mais la fiche les affichait dès que la colonne était renseignée,
+    sans regarder l'anonymat. Une déclaration déposée avant cette règle, ou par un autre chemin,
+    aurait donc exposé ce qui devait rester caché.
+
+    Le masquage est ici, à l'AFFICHAGE, et non conditionné à ce que la capture a bien fait : une
+    donnée qu'on s'est engagé à ne pas montrer ne doit pas dépendre de l'écran qui l'a saisie.
+  */
+  const montrerLeDeclarant = !dossier.is_anonymous
+
+  const aUnRattachement =
+    dossier.directions !== null ||
+    dossier.poste !== null ||
+    dossier.declarant_est_victime !== null ||
+    (montrerLeDeclarant &&
+      (dossier.directions_dossiers_direction_declarant_idTodirections !== null ||
+        dossier.poste_declarant !== null))
+
+  const sections: SectionDossier[] = [
+    { id: 'description', libelle: 'Description' },
+    ...(aUnRattachement ? [{ id: 'rattachement', libelle: 'Rattachement' }] : []),
+    ...(dossier.declaration_identites ? [{ id: 'identite', libelle: 'Identité' }] : []),
+    { id: 'pieces-jointes', libelle: 'Pièces jointes', nombre: pieces.length },
+    { id: 'investigations', libelle: 'Investigations', nombre: investigationsVues.length },
+    { id: 'actions-correctives', libelle: 'Actions correctives', nombre: actionsVues.length },
+    ...(peutVoirMessagerie(utilisateur, contexteParcours)
+      ? [{ id: 'messagerie', libelle: 'Messagerie', nombre: messagesVus.length }]
+      : []),
+    { id: 'historique', libelle: 'Historique', nombre: historique.length },
+  ]
+
+  return (
+    <div className="space-y-5">
+      <FilAriane
+        mailles={[{ libelle: 'Dossiers', href: '/dossiers' }, { libelle: dossier.reference }]}
+      />
+
+      {/* En-tête : ce qu'est ce dossier à gauche, où il en est à droite. L'ordre des étiquettes
+          est fixe — statut, gravité, échéance — pour que l'œil les retrouve au même endroit d'un
+          dossier à l'autre. */}
+      <Card className="p-5">
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-caption text-muted-foreground">
+                {dossier.reference}
+              </span>
+              {dossier.is_anonymous && (
+                <EtiquetteStatut ton="neutre">Déclarant anonyme</EtiquetteStatut>
+              )}
+            </div>
+            <h1 className="mt-1 text-h1 text-secondary-900">{dossier.categories.libelle}</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {dossier.parcours.libelle} · reçu le {dateCourteFr(dossier.created_at)}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <EtiquetteStatut ton="encours">
+              {dossier.statuts_dossier.libelle_interne}
+            </EtiquetteStatut>
+            {dossier.niveaux_gravite ? (
+              <EtiquetteStatut ton={tonGravite(dossier.niveaux_gravite.niveau)}>
+                Gravité : {dossier.niveaux_gravite.libelle}
+              </EtiquetteStatut>
+            ) : (
+              <EtiquetteStatut ton="attention">Gravité à qualifier</EtiquetteStatut>
+            )}
+            {restants !== null && (
+              <EtiquetteStatut
+                ton={restants < 0 ? 'alerte' : restants <= 3 ? 'attention' : 'neutre'}
+              >
+                {restants < 0
+                  ? `En retard de ${Math.abs(restants)} j`
+                  : restants === 0
+                    ? 'Échéance aujourd’hui'
+                    : `${restants} j avant échéance`}
+              </EtiquetteStatut>
+            )}
+            {/* CDC §11.2 : enveloppe totale depuis la création (DT-23). Un dossier peut tenir
+                chacune de ses étapes et dépasser malgré tout ce délai d'ensemble. */}
+            {limiteGlobale !== null && limiteGlobale < new Date() && (
+              <EtiquetteStatut ton="alerte">Délai global dépassé</EtiquetteStatut>
+            )}
+          </div>
+        </div>
+      </Card>
+
+      {suivi !== null && (
+        <BlocSuiviEi
+          enCharge={enCharge.map((c) => c.nom)}
+          gravite={dossier.niveaux_gravite?.libelle ?? null}
+          joursRestants={restants}
+          actionsOuvertes={suivi.actionsOuvertes}
+          actionsTotal={suivi.actionsTotal}
+          actionsEnRetard={suivi.actionsEnRetard}
+          // `dateCourteFr` rend « — » sur `null` : ici l'absence doit rester `null`, pour que
+          // l'encadré taise la ligne au lieu d'annoncer « prochaine échéance le — ».
+          prochaineEcheance={
+            suivi.prochaineEcheance ? dateCourteFr(suivi.prochaineEcheance) : null
+          }
+        />
+      )}
+
+      <SommaireDossier sections={sections} />
+
+      <div className="grid gap-5 lg:grid-cols-3">
+        <div className="space-y-5 lg:col-span-2">
+          {/* `scroll-mt` compense la barre supérieure et le sommaire, tous deux collants : sans
+              lui, l'ancre dépose le titre de section DERRIÈRE eux. */}
+          <section id="description" className="scroll-mt-28">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-h3">Description</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {dossier.description.trim() === '' ? (
+                  // La description est facultative depuis le 08/09/2026 : un dossier peut n'en
+                  // porter aucune. Le dire explicitement évite de laisser croire à un défaut
+                  // d'affichage — et oriente vers le seul endroit où l'obtenir.
+                  <p className="text-sm text-muted-foreground">
+                    Aucune description n’a été saisie lors de la déclaration. La messagerie du
+                    dossier permet d’en demander une au déclarant, s’il n’est pas anonyme.
+                  </p>
+                ) : (
+                  <p className="whitespace-pre-line text-sm text-secondary-700">
+                    {dossier.description}
+                  </p>
+                )}
+
+                <dl className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {(
+                    [
+                      ['Lieu', dossier.lieu],
+                      [
+                        'Date des faits',
+                        dossier.date_survenance ? dateCourteFr(dossier.date_survenance) : null,
+                      ],
+                      // ⚠️ Traduit, et non plus rendu brut : la colonne porte « premiere_fois ».
+                      [
+                        'Caractère répétitif',
+                        libelleValeur(
+                          dossier.parcours.code as ParcoursCode,
+                          'caractereRepetitif',
+                          dossier.caractere_repetitif
+                        ),
+                      ],
+                      ['Précision de la catégorie', dossier.categorie_autre_precision],
+                      /*
+                        La FAMILLE DE RISQUE, à côté de la catégorie parce que c'est là qu'on la
+                        cherche — mais elle ne vient pas du même endroit : la catégorie est le mot
+                        du déclarant au dépôt, la famille la lecture du traitant après analyse.
+                        Vide tant que personne ne l'a posée, et la ligne disparaît alors.
+                      */
+                      ['Famille de risque', dossier.familles_risque?.libelle ?? null],
+                      ['Ville', dossier.ville],
+                      ['Précision de localisation', dossier.precision_localisation],
+                      /*
+                        L'entreprise et la qualité du plaignant ont CHANGÉ DE TABLE.
+
+                        Elles vivaient dans `declaration_identites`, où une déclaration anonyme ne
+                        crée aucune ligne : elles y étaient demandées puis perdues. Elles sont
+                        désormais sur `dossiers` — mais les déclarations antérieures les portent
+                        encore à l'ancien endroit. On lit donc les deux, la nouvelle d'abord.
+                      */
+                      [
+                        'Entreprise',
+                        dossier.entreprise ?? dossier.declaration_identites?.entreprise ?? null,
+                      ],
+                      [
+                        'Qualité du plaignant',
+                        libelleValeur(
+                          dossier.parcours.code as ParcoursCode,
+                          'statutPlaignant',
+                          dossier.statut_plaignant ??
+                            dossier.declaration_identites?.statut_plaignant ??
+                            null
+                        ),
+                      ],
+                      ['Précision de la qualité', dossier.statut_plaignant_precision],
+                      ['Solution souhaitée', dossier.proposition_mesure_corrective],
+                      ['Attentes du déclarant', dossier.attentes_declarant],
+                    ] as const
+                  ).map(([libelle, valeur]) =>
+                    valeur ? (
+                      <div key={libelle}>
+                        <dt className="text-caption text-muted-foreground">{libelle}</dt>
+                        <dd className="text-sm text-secondary-800">{valeur}</dd>
+                      </div>
+                    ) : null
+                  )}
+                </dl>
+              </CardContent>
+            </Card>
+          </section>
+
+          {/*
+            Qui a déclaré, et pour qui.
+
+            ⚠️ Rien ici n'est une donnée d'IDENTITÉ : ces champs vivent sur `dossiers` et sont
+            collectés même en anonymat. Une direction compte des centaines de personnes, et savoir
+            qu'un signalement émane d'un témoin plutôt que de la personne concernée oriente
+            l'instruction sans rien révéler de l'un ni de l'autre. Le bloc suivant, lui, porte
+            l'identité et n'est pas même chargé pour qui n'y a pas droit.
+          */}
+          {aUnRattachement && (
+            <section id="rattachement" className="scroll-mt-28">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-h3">Rattachement</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <dl className="grid gap-3 sm:grid-cols-2">
+                    {(
+                      [
+                        /*
+                          Trois états, pas deux, et l'écart compte.
+
+                          `null` ne veut pas dire « non » : il désigne les déclarations antérieures
+                          à ce champ, à qui la question n'a jamais été posée. Les confondre ferait
+                          passer des dizaines de dossiers pour des signalements de tiers.
+                        */
+                        [
+                          'Le déclarant est la personne concernée',
+                          dossier.declarant_est_victime === null
+                            ? null
+                            : dossier.declarant_est_victime
+                              ? 'Oui'
+                              : 'Non',
+                        ],
+                        ['Direction de la victime', dossier.directions?.libelle ?? null],
+                        [
+                          'Poste de la victime',
+                          // « Autre » seul n'apprend rien : c'est la précision qu'il faut lire.
+                          dossier.poste_precision ?? dossier.poste,
+                        ],
+                        // Voir `montrerLeDeclarant` : rien du déclarant sur une déclaration
+                        // anonyme, quelle que soit la donnée en base.
+                        [
+                          'Direction du déclarant',
+                          montrerLeDeclarant
+                            ? (dossier
+                                .directions_dossiers_direction_declarant_idTodirections
+                                ?.libelle ?? null)
+                            : null,
+                        ],
+                        [
+                          'Poste du déclarant',
+                          montrerLeDeclarant
+                            ? (dossier.poste_declarant_precision ?? dossier.poste_declarant)
+                            : null,
+                        ],
+                      ] as const
+                    ).map(([libelle, valeur]) =>
+                      valeur ? (
+                        <div key={libelle}>
+                          <dt className="text-caption text-muted-foreground">{libelle}</dt>
+                          <dd className="text-sm text-secondary-800">{valeur}</dd>
+                        </div>
+                      ) : null
+                    )}
+                  </dl>
+                </CardContent>
+              </Card>
+            </section>
+          )}
+
+          {/* RG-06 / acteurs.md : l'identité n'est même pas chargée pour un rôle qui n'y a pas
+              droit — elle ne peut donc pas fuiter par un oubli d'affichage. */}
+          {dossier.declaration_identites && (
+            <section id="identite" className="scroll-mt-28">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-h3">Identité du déclarant</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <dl className="grid gap-3 sm:grid-cols-2">
+                    {(
+                      [
+                        ['nom_prenom', 'Nom et prénom'],
+                        ['matricule', 'Matricule'],
+                        ['entreprise', 'Entreprise'],
+                        ['fonction', 'Fonction'],
+                        ['localite', 'Localité'],
+                        ['statut_plaignant', 'Statut'],
+                        ['contact_email', 'E-mail'],
+                        ['contact_telephone', 'Téléphone'],
+                      ] as const
+                    ).map(([cle, libelle]) => {
+                      const valeur = dossier.declaration_identites?.[cle]
+                      if (!valeur) return null
+                      return (
+                        <div key={cle}>
+                          <dt className="text-caption text-muted-foreground">{libelle}</dt>
+                          <dd className="text-sm text-secondary-800">{String(valeur)}</dd>
+                        </div>
+                      )
+                    })}
+                  </dl>
+                </CardContent>
+              </Card>
+            </section>
+          )}
+
+          {dossier.identiteMasquee && (
+            <Alert>
+              <AlertDescription>
+                Les données nominatives de ce dossier ne sont pas accessibles à votre rôle.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          <section id="pieces-jointes" className="scroll-mt-28">
+            <PanneauPiecesJointes
+              pieces={pieces.map((p) => ({
+                id: p.id,
+                nomOriginal: p.nom_original,
+                mimeType: p.mime_type,
+                tailleOctets: Number(p.taille_octets),
+              }))}
+            />
+          </section>
+
+          <section id="investigations" className="scroll-mt-28">
+            <PanneauInvestigations
+              dossierId={id}
+              investigations={investigationsVues}
+              peutOuvrir={peutCreerInvestigation(utilisateur, {
+                ...contexteParcours,
+                enqueteurId: utilisateur.id,
+              })}
+              dossierEnInvestigation={dossier.statutCode === 'en_investigation'}
+            />
+          </section>
+
+          <section id="actions-correctives" className="scroll-mt-28">
+            <PanneauActionsCorrectives
+              dossierId={id}
+              actions={actionsVues}
+              investigations={investigationsRattachables_.map((i) => ({
+                id: i.id,
+                libelle: `Investigation du ${new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long' }).format(i.date_ouverture)}`,
+              }))}
+              droits={droitsActions}
+              dossierEnActionCorrective={dossier.statutCode === 'action_corrective_en_cours'}
+            />
+          </section>
+
+          {peutVoirMessagerie(utilisateur, contexteParcours) && (
+            <section id="messagerie" className="scroll-mt-28">
+              <PanneauMessagerie
+                dossierId={id}
+                messages={messagesVus}
+                peutEnvoyer={peutEnvoyerMessage(utilisateur, contexteParcours)}
+              />
+            </section>
+          )}
+
+          <section id="historique" className="scroll-mt-28">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-h3">Historique</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {/* Frise verticale : le trait relie les étapes et donne à voir d'un coup le chemin
+                    parcouru, là où une liste à puces demandait de le reconstituer. */}
+                <ol className="relative space-y-4 border-l border-border pl-5">
+                  {historique.map((h) => (
+                    <li key={String(h.id)} className="relative">
+                      <span
+                        aria-hidden
+                        className="absolute -left-[23px] top-1.5 h-2 w-2 rounded-full bg-secondary-300 ring-4 ring-card"
+                      />
+                      <p className="text-sm text-secondary-800">
+                        <span className="font-medium">
+                          {
+                            h
+                              .statuts_dossier_historique_statuts_statut_suivant_idTostatuts_dossier
+                              .libelle_interne
+                          }
+                        </span>{' '}
+                        — {h.users?.name ?? 'Système'}
+                      </p>
+                      <p className="text-caption text-muted-foreground">{dateFr(h.created_at)}</p>
+                      {h.commentaire && (
+                        <p className="mt-1 text-caption text-secondary-600">{h.commentaire}</p>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              </CardContent>
+            </Card>
+          </section>
+        </div>
+
+        {/* Colonne d'actions collante : sur un dossier long, changer de statut ne doit pas
+            imposer de remonter en haut de page. */}
+        <div className="lg:sticky lg:top-28 lg:self-start">
+          <PanneauActions
+            dossierId={id}
+            statutCode={dossier.statutCode}
+            /*
+              ⚠️ DEUX SOURCES, selon le parcours — et une seule est juste pour chacun.
+
+              L'évènement indésirable n'est affecté à personne : sa charge se déduit du
+              rattachement, comme dans l'encadré de suivi juste au-dessus. Lire
+              `dossier_affectations` ici faisait dire « Personne » à cette carte pendant que
+              l'encadré nommait le chargé de sécurité — c'est ce qui a été remonté.
+            */
+            affectations={
+              enCharge.length > 0 || affectations.length === 0
+                ? enCharge.map((c) => ({ id: String(c.id), nom: c.nom }))
+                : affectations.map((a) => ({
+                    id: String(a.id),
+                    nom: a.users_dossier_affectations_user_idTousers.name,
+                  }))
+            }
+            parRattachement={enCharge.length > 0 || affectations.length === 0}
+            transitions={transitions.map((t) => ({ code: t.code, libelle: t.libelle_interne }))}
+            acteursDeLEtape={acteursAttendus}
+            // Proposée seulement tant qu'aucune gravité n'est posée : requalifier un dossier déjà
+            // qualifié n'a pas été demandé, et rouvrirait la question du circuit accéléré.
+            gravitesAQualifier={
+              dossier.niveaux_gravite === null
+                ? gravitesActives.map((g) => ({ valeur: String(g.id), libelle: g.libelle }))
+                : []
+            }
+            famillesRisque={famillesRisque.map((f) => ({
+              valeur: String(f.id),
+              libelle: f.libelle,
+            }))}
+            familleRisqueActuelle={
+              dossier.famille_risque_id === null ? '' : String(dossier.famille_risque_id)
+            }
+            droits={{
+              changerStatut: peutChangerStatutDossier(utilisateur, pourPolicy),
+              cloturer: peutCloturerDossier(utilisateur, pourPolicy),
+              reouvrir: peutReouvrirDossier(utilisateur, pourPolicy),
+              // RG-11 : le blocage contentieux relève du seul DPO, indépendamment des droits
+              // détenus sur le dossier lui-même.
+              gererContentieux: aPermission(utilisateur, 'rgpd.conservation.manage'),
+            }}
+            contentieux={dossier.contentieux}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
