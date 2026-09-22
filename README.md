@@ -4,10 +4,6 @@ Digitalisation du **Mécanisme de Gestion des Plaintes** : déclaration et suivi
 indésirables et de griefs sur 4 parcours (EI Employé, Grief Employé, Grief Sous-traitant, Grief
 Communauté).
 
-Cette application a remplacé un portage Laravel, retiré depuis. Le schéma et les référentiels,
-qui n'existaient que dans ses migrations et ses seeders, sont préservés ici (voir *Recréer un
-environnement*).
-
 ---
 
 ## ⚠️ À lire avant toute commande
