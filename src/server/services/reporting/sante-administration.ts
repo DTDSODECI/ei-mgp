@@ -2,25 +2,20 @@ import { prisma } from '@/lib/prisma'
 import { ROLE_NAMES, etapesSansActeur, matriceDesEtapes } from '@/server/authz'
 import { configurationSmtp } from '../notification/transport'
 import { STATUTS } from '../dossier/statuts'
+import { MODELES } from '@/server/modeles'
 
-/** `String.raw` obligatoire : en littéral classique, `\M` et `\U` seraient supprimés. */
-const MODEL_TYPE_USER = String.raw`App\Models\User`
+/** Le `model_type` des comptes dans la table d'attribution des rôles. Voir `@/server/modeles`. */
+const MODEL_TYPE_USER = MODELES.utilisateur
 
 /**
  * Ce qui appelle une décision d'administrateur, par opposition à ce qui se compte.
  *
- * Le tableau de bord accueille TOUS les comptes authentifiés (DT-31), mais il ne parlait que de
- * dossiers. Or l'administrateur digital n'en a aucun, et n'en aura jamais : DT-02 lui refuse tout
- * accès au contenu des déclarations, délibérément. Il arrivait donc chaque matin sur
- * « Aucun dossier ne vous est affecté — ceux qui vous seront confiés apparaîtront ici », une
- * promesse que son propre rôle interdit de tenir, et pas un mot de ce dont il répond réellement.
+ * Les contrôles ci-dessous sont ceux qu'on ne voit nulle part ailleurs : chaque console montre son
+ * propre référentiel, aucune ne dit qu'un réglage en rend un autre inopérant. Un délai non validé
+ * n'éteint pas une console, il éteint TOUTES les relances.
  *
- * Les contrôles ci-dessous sont ceux qu'on ne voit nulle part ailleurs : chaque console
- * d'administration montre son propre référentiel, aucune ne dit qu'un réglage en rend un autre
- * inopérant. Un délai non validé n'éteint pas une console, il éteint TOUTES les relances.
- *
- * ⚠️ Un contrôle ne remonte que s'il a quelque chose à dire. Une ligne qui annonce zéro tous les
- * jours cesse d'être lue, et fait passer pour vide un écran qui ne l'est pas.
+ * ⚠️ Un contrôle ne remonte que s'il a quelque chose à dire : une ligne qui annonce zéro tous les
+ * jours cesse d'être lue.
  */
 
 export type AlerteAdministration = {
@@ -40,6 +35,7 @@ export async function santeAdministration(): Promise<AlerteAdministration[]> {
     directionsSansSite,
     motsDePasseATransmettre,
     postesActifs,
+    postesOrphelins,
     lieuxActifs,
     villesActives,
     rolesEnBase,
@@ -53,16 +49,9 @@ export async function santeAdministration(): Promise<AlerteAdministration[]> {
     prisma.sla_delais.count({ where: { est_valide_metier: false } }),
 
     /*
-      ⚠️ SANS SITE **ET** SANS PERSONNE HABILITÉE DESSUS.
-
-      Cette alerte comptait toutes les directions sans site, en affirmant que leurs déclarations
-      n'atteignaient personne. Ce n'est plus vrai : depuis qu'on peut habiliter un compte
+      ⚠️ Sans site ET sans personne habilitée dessus : depuis qu'un compte peut être habilité
       directement sur une direction, celle-ci achemine ses déclarations sans passer par un site.
-      C'est même le cas observé en production — une direction sans site, avec son chargé de
-      sécurité, qui fonctionne.
-
-      Maintenue telle quelle, l'alerte aurait signalé comme bloquant un paramétrage correct. Une
-      alerte fausse est ce qui finit par faire ignorer les vraies.
+      Compter toutes les directions sans site signalerait comme bloquant un paramétrage correct.
     */
     prisma.directions.count({
       where: { actif: true, site_id: null, users: { none: { actif: true } } },
@@ -73,11 +62,25 @@ export async function santeAdministration(): Promise<AlerteAdministration[]> {
     prisma.users.count({ where: { actif: true, doit_changer_mot_de_passe: true } }),
 
     prisma.postes.count({ where: { actif: true } }),
+
+    /*
+      Comptes dont le poste ne figure PAS au référentiel.
+
+      ⚠️ En SQL brut parce qu'aucune relation ne lie `users.poste` à `postes.libelle` — c'est le
+      défaut même que ce contrôle rend visible. Requête paramétrée, pour que la forme reste
+      copiable sans danger ailleurs.
+    */
+    prisma.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*) AS n FROM users u
+      WHERE u.poste IS NOT NULL AND u.poste <> ''
+        AND NOT EXISTS (SELECT 1 FROM postes p WHERE p.libelle = u.poste)
+    `.then((lignes) => Number(lignes[0]?.n ?? 0)),
+
     prisma.lieux.count({ where: { actif: true } }),
     prisma.villes.count({ where: { actif: true } }),
 
     prisma.roles.findMany({
-      where: { guard_name: 'web', actif: true },
+      where: { actif: true },
       select: { id: true, name: true, libelle: true },
     }),
     prisma.model_has_roles.findMany({
@@ -124,7 +127,16 @@ export async function santeAdministration(): Promise<AlerteAdministration[]> {
   const rolesPortes = new Set<string>(
     associations.filter((l) => actifs.has(l.model_id) && l.roles.actif).map((l) => l.roles.name)
   )
-  const orphelines = etapesSansActeur(matrice, rolesPortes)
+  /*
+    ⚠️ SEULS LES STATUTS ACTIFS sont examinés (D2, 2026-09-22).
+
+    Un statut désactivé n'est proposé comme destination par aucune transition : aucun dossier ne
+    peut l'atteindre, et le compter parmi les « étapes que personne ne peut franchir » annoncerait
+    un blocage inexistant. `en_attente_information` est dans ce cas aujourd'hui.
+  */
+  const atteignables = new Set(statutsEnBase.filter((s) => s.actif).map((s) => s.code))
+
+  const orphelines = etapesSansActeur(matrice, rolesPortes, atteignables)
 
   /*
     Un rôle actif que personne ne porte n'est pas qu'une curiosité de configuration.
@@ -139,16 +151,12 @@ export async function santeAdministration(): Promise<AlerteAdministration[]> {
   ).length
 
   /*
-    Un état du circuit ABSENT de la base.
+    Un état du circuit ABSENT de la base : le plus coûteux des réglages manquants, et le plus muet.
+    Sans « recu », plus aucune déclaration ne s'enregistre et le déclarant lit « merci de
+    réessayer ».
 
-    Le plus coûteux des réglages manquants, et le plus muet. `creerDeclaration()` cherche
-    « recu » par son code à chaque dépôt : sans cette ligne, plus aucune déclaration ne peut
-    être enregistrée, et le déclarant ne lit qu'un « merci de réessayer ». Les autres états
-    immobilisent les dossiers qui devraient les atteindre.
-    
-    La suppression d'un statut est autorisée — décision métier — et n'est donc plus barrée en
-    amont. Elle est barrée en AVAL : ce contrôle nomme ce qui manque, et `npm run seed` le
-    restaure à l'identique depuis `referentiels.json`.
+    La suppression d'un statut étant autorisée, le garde-fou est en AVAL : ce contrôle nomme ce
+    qui manque, et `npm run seed` le restaure depuis `referentiels.json`.
   */
   const codesEnBase = new Set(statutsEnBase.map((s) => s.code))
   const etatsManquants = STATUTS.filter((code) => !codesEnBase.has(code))
@@ -259,6 +267,27 @@ export async function santeAdministration(): Promise<AlerteAdministration[]> {
       consequence: 'La ville est obligatoire : les riverains ne peuvent plus déclarer.',
       href: '/administration/listes-formulaires',
       bloquant: true,
+    },
+    {
+      /*
+        ⚠️ LE SEUL LIEN QUE LE SCHÉMA NE PEUT PAS TENIR.
+
+        `users.poste` porte le LIBELLÉ du poste, pas une clé : aucune contrainte ne garantit qu'il
+        existe encore dans le référentiel. Un compte peut donc porter un poste que plus aucune
+        liste ne propose, et que plus rien n'explique — c'est le cas aujourd'hui de « CS Achat ».
+
+        Ce contrôle ne DÉCIDE rien : rattacher un poste orphelin suppose de choisir sa direction,
+        ce qui relève du métier. Il rend simplement visible ce qui, sans lui, n'apparaît nulle
+        part — ni dans la console des comptes, qui affiche le libellé sans le vérifier, ni dans
+        celle des postes, qui ne connaît que les siens.
+      */
+      cle: 'postes-orphelins',
+      libelle: 'Comptes portant un poste absent du référentiel',
+      valeur: postesOrphelins,
+      consequence:
+        'Leur poste ne correspond à aucune entrée : il n’apparaîtra dans aucune liste et ne peut pas être corrigé par filtrage.',
+      href: '/administration/utilisateurs',
+      bloquant: false,
     },
   ]
 

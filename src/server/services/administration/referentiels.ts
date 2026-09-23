@@ -12,19 +12,14 @@ import {
 } from '../audit/journal'
 
 /**
- * Référentiels administrables (module 7) — port des composants `App\Livewire\Administration\*`.
+ * Référentiels administrables (module 7).
  *
- * **Une entrée citée par l'historique ne peut pas être supprimée** (RG-03). La suppression
- * existe depuis le 12/09/2026, mais elle est CONDITIONNELLE : chaque fonction compte d'abord ce
- * qui référence la ligne, et refuse tant que ce compte n'est pas nul. Une catégorie déjà portée
- * par un dossier ne part donc jamais — il reste la désactivation (`actif`), qui la retire des
- * formulaires sans toucher au passé. Postes, lieux, villes et tranches, eux, ne sont cités par
- * aucune table : leur valeur est recopiée en texte au moment de la déclaration, et les effacer
- * ne réécrit aucun historique.
+ * ⚠️ Une entrée citée par l'historique ne se supprime pas (RG-03). La suppression est donc
+ * CONDITIONNELLE : chaque fonction compte d'abord ce qui référence la ligne et refuse tant que ce
+ * compte n'est pas nul. Reste la désactivation, qui retire l'entrée des formulaires sans toucher
+ * au passé.
  *
- * Chaque mutation est journalisée au format de `AuditObserver` (`modele.cree` / `modele.modifie`,
- * avec le différentiel des seuls champs modifiés), pour que la console d'audit de Laravel
- * continue de lire ces lignes à l'identique pendant la migration.
+ * Chaque mutation est journalisée avec le différentiel des seuls champs modifiés.
  */
 
 type Acteur = { id: bigint }
@@ -42,18 +37,10 @@ export type DonneesCategorie = {
 /**
  * Rang manuel d'abord, alphabétique ensuite — groupé par parcours.
  *
- * Ces deux critères ne s'opposent pas, ils se complètent, et c'est ce qui permet de tenir les
- * deux demandes à la fois (arbitrages des 11 et 12/09/2026) :
- *
- * - le champ « Ordre d'affichage » a disparu des paramètres : plus de numéro à taper, plus de
- *   renumérotation à la main à chaque ajout ;
- * - tant que les lignes d'un groupe partagent le même rang — c'est le cas de la plupart d'entre
- *   elles — le rang ne départage rien et l'affichage est ALPHABÉTIQUE, par défaut ;
- * - les boutons « monter / descendre » attribuent des rangs distincts, et l'ordre voulu prend
- *   alors le pas sur l'alphabet, là où il porte un sens.
- *
- * Ce dernier point n'est pas théorique : les tranches d'ancienneté forment une échelle. Classées
- * alphabétiquement, « Moins d'1 an » tombait en quatrième position, après « 5 à 10 ans ».
+ * Les deux critères se complètent : tant que les lignes d'un groupe partagent le même rang, il ne
+ * départage rien et l'affichage est alphabétique. Les boutons « monter / descendre » attribuent
+ * des rangs distincts, et l'ordre voulu prend alors le pas — utile là où il porte un sens, une
+ * échelle d'ancienneté par exemple.
  */
 export async function listerCategories() {
   return prisma.categories.findMany({
@@ -145,10 +132,8 @@ export type DonneesStatut = {
   /**
    * Faux = plus proposé comme destination d'une transition manuelle.
    *
-   * ⚠️ Les dossiers qui s'y trouvent déjà y RESTENT et continuent d'en sortir : on retire une
-   * valeur du choix futur, on ne réécrit pas le passé. La création d'une déclaration ne consulte
-   * pas ce drapeau — « reçu » est attribué quoi qu'il arrive, le premier état d'un dossier
-   * n'étant pas un choix qu'on lui propose.
+   * ⚠️ Les dossiers qui s'y trouvent déjà y restent et continuent d'en sortir. La création ne
+   * consulte pas ce drapeau : « reçu » est attribué quoi qu'il arrive.
    */
   actif: boolean
 }
@@ -226,12 +211,8 @@ export async function enregistrerSite(
   }
 
   /**
-   * Un site encore porteur de directions actives ne se désactive pas.
-   *
-   * Le site d'un dossier découle de sa direction : désactiver le site laisserait ces directions
-   * pointer vers un rattachement hors service, et les déclarations qui les visent continueraient
-   * d'être acheminées vers un site que l'administration croit fermé. Détacher d'abord les
-   * directions rend la décision explicite.
+   * Un site encore porteur de directions actives ne se désactive pas : les déclarations qui les
+   * visent continueraient d'être acheminées vers un site que l'administration croit fermé.
    */
   if (siteId !== undefined && !donnees.actif) {
     const rattachees = await prisma.directions.count({ where: { site_id: siteId, actif: true } })
@@ -366,12 +347,9 @@ export async function enregistrerDirection(
   })
 
   /**
-   * Changer le site d'une direction ne réécrit PAS les dossiers déjà déposés.
-   *
-   * Leur `site_id` a été figé à la déclaration, et c'est voulu : il dit de quel site relevait le
-   * signalement au moment des faits, pas où la direction se trouve aujourd'hui. Réattribuer
-   * rétroactivement ferait changer de mains des dossiers en cours de traitement, sans que
-   * personne l'ait décidé — la réaffectation existe pour cela, et elle est tracée.
+   * Changer le site d'une direction ne réécrit PAS les dossiers déjà déposés : leur `site_id` dit
+   * de quel site relevait le signalement au moment des faits. La réaffectation existe pour cela,
+   * et elle est tracée.
    */
   await journaliserModification(
     'direction.modifiee',
@@ -388,13 +366,8 @@ export async function enregistrerDirection(
 /**
  * Rattache une direction à un site, ou l'en détache.
  *
- * Geste distinct de `enregistrerDirection` à dessein : c'est le seul de cet écran qui déplace une
- * direction d'un site à l'autre, et le journal doit pouvoir le dire sans qu'on ait à comparer
- * quatre colonnes pour deviner ce qui a changé.
- *
- * Ne réécrit AUCUN dossier déjà déposé : leur `site_id` a été figé à la déclaration, et il dit de
- * quel site relevait le signalement à ce moment-là. Réattribuer rétroactivement ferait changer de
- * mains des dossiers en cours sans que personne l'ait décidé.
+ * Geste distinct de `enregistrerDirection` pour que le journal puisse le nommer, sans qu'on ait à
+ * comparer quatre colonnes. Ne réécrit aucun dossier déjà déposé — voir ci-dessus.
  */
 export async function rattacherDirection(
   acteur: Acteur,
@@ -580,21 +553,19 @@ export async function enregistrerGabarit(
 
 export type SensDeplacement = 'monter' | 'descendre'
 
-/** `App\Models\Categorie` → `categorie`, pour composer le code d'action du journal. */
+/** Les codes de `@/server/modeles` SONT les préfixes d'action : il n'y a rien à dériver. */
 function codeModele(type: ModeleAudite): string {
-  return (type.split('\\').pop() ?? type).toLowerCase()
+  return type
 }
 
 /**
  * Déplace une ligne d'un rang, et RENUMÉROTE tout son groupe.
  *
- * Renuméroter plutôt qu'échanger deux valeurs n'est pas un excès de zèle : aujourd'hui, la
- * plupart des listes ont toutes leurs lignes au même rang — leur affichage n'est qu'alphabétique.
- * Échanger deux valeurs identiques ne déplacerait rien du tout. La renumérotation fige donc
- * l'ordre affiché au moment du clic, puis y applique le déplacement demandé.
+ * Renuméroter, parce que la plupart des listes ont toutes leurs lignes au même rang : échanger
+ * deux valeurs identiques ne déplacerait rien.
  *
- * Le groupe est reçu DÉJÀ TRIÉ comme il est affiché : « monter » doit signifier « d'une ligne
- * vers le haut à l'écran », et non « d'une unité de rang ».
+ * Le groupe est reçu déjà trié comme il est affiché — « monter » signifie « d'une ligne vers le
+ * haut à l'écran », pas « d'une unité de rang ».
  */
 async function deplacerDansGroupe(
   acteur: Acteur,
@@ -686,8 +657,7 @@ function ecrireRangListePlate(liste: ListePlate, id: bigint, ordre: number) {
   const data = { ordre, updated_at: new Date() }
 
   if (liste === 'lieu') return prisma.lieux.update({ where: { id }, data })
-  if (liste === 'ville') return prisma.villes.update({ where: { id }, data })
-  return prisma.tranches_anciennete.update({ where: { id }, data })
+  return prisma.villes.update({ where: { id }, data })
 }
 
 export async function deplacerListePlate(
@@ -709,13 +679,11 @@ export async function deplacerListePlate(
 }
 
 /**
- * Supprime une catégorie — À CONDITION que rien ne la cite.
+ * Supprime une catégorie — à condition que rien ne la cite.
  *
- * `dossiers` et `statistiques_mensuelles` portent une clé vers `categories`. Effacer une ligne
- * citée laisserait des dossiers dont plus personne ne saurait dire de quoi ils traitaient, et des
- * agrégats dont la colonne de regroupement aurait disparu : c'est exactement ce que RG-03
- * protège. Le refus est donc une règle, pas une prudence — et la désactivation reste offerte, qui
- * retire l'entrée des formulaires sans toucher au passé.
+ * `dossiers` et `statistiques_mensuelles` portent une clé vers `categories` : effacer une ligne
+ * citée laisserait des dossiers dont plus personne ne saurait de quoi ils traitaient (RG-03). Le
+ * refus est une règle, pas une prudence ; la désactivation reste offerte.
  */
 export async function supprimerCategorie(acteur: Acteur, categorieId: bigint): Promise<void> {
   const cible = await prisma.categories.findUniqueOrThrow({
@@ -797,7 +765,17 @@ export async function supprimerPoste(acteur: Acteur, posteId: bigint): Promise<v
   })
 }
 
-/** Voir `supprimerPoste()` : ces trois listes ne sont citées par aucune clé étrangère. */
+/**
+ * Supprime un lieu ou une ville — à condition qu'aucun dossier ne l'ait retenu.
+ *
+ * ⚠️ Le lien ne passe par AUCUNE clé étrangère : `dossiers.lieu` et `dossiers.ville` portent le
+ * libellé en clair, délibérément, pour que renommer un référentiel ne réécrive pas ce qu'un
+ * déclarant a répondu. PostgreSQL ne peut donc pas s'opposer à l'effacement — d'où ce contrôle,
+ * sans lequel un dossier affiche une valeur que plus aucune liste ne propose.
+ *
+ * ⚠️ Le décompte porte sur `cible.libelle`, pas sur l'identifiant : c'est le libellé qui est
+ * stocké sur le dossier.
+ */
 export async function supprimerListePlate(
   acteur: Acteur,
   liste: ListePlate,
@@ -808,9 +786,20 @@ export async function supprimerListePlate(
 
   if (!cible) throw new ErreurWorkflow('Entrée introuvable.')
 
+  const citations = await prisma.dossiers.count({
+    where: liste === 'lieu' ? { lieu: cible.libelle } : { ville: cible.libelle },
+  })
+
+  if (citations > 0) {
+    throw new ErreurWorkflow(
+      `« ${cible.libelle} » est cité par ${citations} dossier${citations > 1 ? 's' : ''} : ` +
+        'le supprimer rendrait ces déclarations incompréhensibles. ' +
+        'Désactivez cette entrée pour la retirer des formulaires sans toucher à l’historique.'
+    )
+  }
+
   if (liste === 'lieu') await prisma.lieux.delete({ where: { id: ligneId } })
-  else if (liste === 'ville') await prisma.villes.delete({ where: { id: ligneId } })
-  else await prisma.tranches_anciennete.delete({ where: { id: ligneId } })
+  else await prisma.villes.delete({ where: { id: ligneId } })
 
   await journaliser({
     action: `${codeModele(MODELE_DE_LISTE[liste])}.supprimee`,
@@ -848,13 +837,12 @@ async function journaliserModification(
 }
 
 /* ==========================================================================
-   Référentiels des formulaires (retour métier du 11/09/2026)
+   Référentiels des formulaires
    ==========================================================================
 
-   Postes, lieux, villes et tranches d'ancienneté alimentent les listes déroulantes des
-   formulaires publics. Tous portent `actif` et AUCUN ne se supprime : une valeur retirée de
-   l'usage se désactive, sans quoi les déclarations qui l'ont retenue perdraient le sens de ce
-   qui y a été choisi. C'est la même règle que pour les sites et les directions.
+   Postes, lieux et villes alimentent les listes déroulantes des formulaires publics. Tous portent
+   `actif`, et leur suppression est conditionnée à l'absence de dossier les ayant retenus — voir
+   `supprimerListePlate()`.
 */
 
 export type DonneesPoste = {
@@ -940,30 +928,25 @@ export async function enregistrerPoste(
 
 export type DonneesListeSimple = { libelle: string; actif: boolean }
 
-/** Les trois listes plates partagent la même forme : un libellé et un état. */
-export type ListePlate = 'lieu' | 'ville' | 'trancheAnciennete'
+/** Les deux listes plates partagent la même forme : un libellé et un état. */
+export type ListePlate = 'lieu' | 'ville'
 
 /*
-  ⚠️ Un `switch` explicite, et non un délégué Prisma choisi dynamiquement.
-
-  Regrouper `prisma.lieux`, `prisma.villes` et `prisma.tranches_anciennete` dans une table de
-  correspondance produit une UNION de signatures que TypeScript déclare non appelable : chaque
-  modèle a ses propres types d'entrée. Le contourner par un `any` aurait fait perdre exactement
-  ce qui protège ici — la vérification que les colonnes écrites existent.
+  ⚠️ Un `switch` explicite, et non un délégué Prisma dynamique : regrouper `prisma.lieux` et
+  `prisma.villes` produit une union de signatures que TypeScript déclare non appelable, et le
+  contourner par un `any` ferait perdre la vérification des colonnes écrites.
 */
 export async function listerListePlate(liste: ListePlate) {
   // Rang puis alphabétique — voir `listerCategories()` pour le motif.
   const options = { orderBy: [{ ordre: 'asc' as const }, { libelle: 'asc' as const }] }
 
   if (liste === 'lieu') return prisma.lieux.findMany(options)
-  if (liste === 'ville') return prisma.villes.findMany(options)
-  return prisma.tranches_anciennete.findMany(options)
+  return prisma.villes.findMany(options)
 }
 
 const MODELE_DE_LISTE: Record<ListePlate, ModeleAudite> = {
   lieu: MODELES.lieu,
   ville: MODELES.ville,
-  trancheAnciennete: MODELES.trancheAnciennete,
 }
 
 export async function enregistrerListePlate(
@@ -988,9 +971,7 @@ export async function enregistrerListePlate(
     const creee =
       liste === 'lieu'
         ? await prisma.lieux.create({ data, select: { id: true } })
-        : liste === 'ville'
-          ? await prisma.villes.create({ data, select: { id: true } })
-          : await prisma.tranches_anciennete.create({ data, select: { id: true } })
+        : await prisma.villes.create({ data, select: { id: true } })
 
     await journaliser({
       action: `${liste}.cree`,
@@ -1009,8 +990,7 @@ export async function enregistrerListePlate(
   const data = { ...valeurs, updated_at: maintenant }
 
   if (liste === 'lieu') await prisma.lieux.update({ where: { id: ligneId }, data })
-  else if (liste === 'ville') await prisma.villes.update({ where: { id: ligneId }, data })
-  else await prisma.tranches_anciennete.update({ where: { id: ligneId }, data })
+  else await prisma.villes.update({ where: { id: ligneId }, data })
 
   await journaliserModification(
     `${liste}.modifie`,

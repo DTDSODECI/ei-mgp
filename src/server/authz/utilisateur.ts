@@ -3,38 +3,23 @@ import type { ParcoursCode } from './parcours'
 import { cloisonnePourSesRoles, donneAccesAuxDossiers } from './site'
 import type { Permission } from './permissions'
 import type { Role } from './roles'
+import { MODELES } from '@/server/modeles'
 
-/**
- * `model_type` utilisé par spatie/laravel-permission pour les comptes utilisateurs.
- *
- * `String.raw` est délibéré : en littéral classique, `'App\Models\User'` vaudrait
- * « AppModelsUser », car `\M` et `\U` ne sont pas des séquences d'échappement valides et
- * JavaScript supprime alors silencieusement les antislashs. Aucune erreur n'est levée — la
- * comparaison échoue simplement toujours, et l'utilisateur se retrouve sans aucun rôle.
- */
-const MODEL_TYPE_USER = String.raw`App\Models\User`
-
-const GUARD = 'web'
+const MODEL_TYPE_USER = MODELES.utilisateur
 
 /**
  * Photographie des autorisations d'un utilisateur à un instant donné.
  *
- * Volontairement dérivée de la BASE à chaque vérification, jamais d'un jeton de session : c'est
- * exactement la sémantique de spatie/laravel-permission côté Laravel. Un changement de rôle ou
- * une désactivation prend ainsi effet immédiatement, sans attendre l'expiration d'un JWT.
+ * Volontairement dérivée de la BASE à chaque vérification, jamais d'un jeton de session. Un
+ * changement de rôle ou une désactivation prend ainsi effet immédiatement, sans attendre
+ * l'expiration d'un JWT.
  */
 export type UtilisateurAutorise = {
   readonly id: bigint
   readonly actif: boolean
   /** Site de rattachement, `null` s'il n'est pas renseigné. Voir `authz/site.ts`. */
   readonly siteId: bigint | null
-  /**
-   * Direction de rattachement, `null` si le compte est habilité sur un site entier.
-   *
-   * ⚠️ PLUS FINE QUE LE SITE et prioritaire sur lui : « on peut être habilité sur un site,
-   * c'est-à-dire plusieurs directions à la fois, ou sur une seule direction — dans ce cas on ne
-   * reçoit que les déclarations de la direction ». Voir `directionCloisonnante()`.
-   */
+  /** Direction de rattachement, `null` si habilité sur un site entier. Prioritaire sur le site. */
   readonly directionId: bigint | null
   /**
    * Le mot de passe a été fixé par un tiers — création de compte ou régénération — et n'a pas
@@ -45,31 +30,21 @@ export type UtilisateurAutorise = {
   readonly roles: readonly Role[]
   readonly permissions: ReadonlySet<Permission>
   /**
-   * Types de déclaration ouverts par ses RÔLES — lus dans `role_parcours`, cochés dans
-   * `/administration/habilitations`.
+   * Types de déclaration ouverts par ses RÔLES, lus dans `role_parcours`.
    *
-   * ⚠️ C'est le périmètre EFFECTIF, et il n'est plus croisé avec quoi que ce soit. L'attribution
-   * par personne (`utilisateur_parcours`) entrait autrefois dans le calcul ; le rôle décide seul
-   * depuis le 2026-09-20.
+   * Périmètre effectif : le rôle décide seul, l'attribution par personne n'entre plus dans le
+   * calcul (décision métier du 2026-09-20).
    */
   readonly parcours: readonly ParcoursCode[]
   /**
    * L'un de ses rôles a-t-il la CHARGE des dossiers ?
    *
-   * ⚠️ NE SE DÉDUIT D'AUCUNE PERMISSION, et c'est la correction du 2026-09-21. « Traiter » était
-   * lu dans `dossiers.status.update` — « peut faire avancer un dossier ». Le Service MGP porte ce
-   * droit sans être traitant : il apparaissait comme titulaire de TOUS les dossiers.
-   *
-   * C'est une donnée d'organisation, pas un droit. Elle se coche rôle par rôle dans l'écran des
-   * habilitations, et se lit ici.
+   * ⚠️ Donnée d'organisation, jamais déduite d'une permission. Le Service MGP porte
+   * `dossiers.status.update` sans être traitant : le déduire le faisait apparaître titulaire de
+   * TOUS les dossiers.
    */
   readonly traiteLesDossiers: boolean
-  /**
-   * Ses porteurs sont-ils bornés à leur site ou à leur direction ?
-   *
-   * ⚠️ PARAMÈTRE DU RÔLE depuis le 2026-09-21, plus une liste de noms écrite dans le code. Un rôle
-   * créé depuis l'interface n'y figurait pas : il voyait tous les sites, et rien ne le disait.
-   */
+  /** Ses porteurs sont-ils bornés à leur site ou à leur direction ? Paramètre du rôle. */
   readonly cloisonneParRattachement: boolean
   /** Ne voit que les déclarations qu'il a lui-même déposées, jamais les anonymes (RG-06). */
   readonly voitSeulementSesDeclarations: boolean
@@ -78,38 +53,20 @@ export type UtilisateurAutorise = {
   /**
    * Étapes de DÉPART qu'il peut franchir, par type de déclaration.
    *
-   * ⚠️ UNE LIGNE ABSENTE INTERDIT. Dans le code, une étape absente de la table des acteurs
-   * signifiait « ouverte à tous » ; la reprise a rendu ces cas explicites, et la règle est
-   * désormais unique : ce qui n'est pas coché n'est pas permis.
+   * ⚠️ Une ligne absente INTERDIT : ce qui n'est pas coché n'est pas permis.
    */
   readonly etapes: readonly { readonly parcours: string; readonly statut: string }[]
 }
 
 /*
-  ⚠️ `aRole()` ET `aUnRoleParmi()` ONT ÉTÉ SUPPRIMÉES le 2026-09-21.
+  ⚠️ Aucune décision d'autorisation ne dépend d'un NOM de rôle. Les quatre qui le faisaient sont
+  devenues des paramètres du rôle, lus ci-dessus : un rôle créé depuis l'interface ne figurait
+  dans aucune liste écrite en dur, se comportait donc autrement, et rien ne le signalait.
 
-  Elles étaient le dernier moyen, pour une décision d'autorisation, de dépendre d'un NOM de rôle.
-  Quatre le faisaient encore — le cloisonnement par site, « ne voit que ses déclarations »,
-  « ne voit pas l'identité du déclarant », et la liste des étapes —, et toutes les quatre
-  partageaient le même défaut : un rôle créé depuis l'interface n'y figurait pas, se comportait
-  donc autrement que celui qu'il remplaçait, et rien ne le signalait.
-
-  Les quatre sont devenues des paramètres du rôle, cochés dans les habilitations et lus ci-dessus.
-  Supprimer les deux fonctions n'est pas du rangement : c'est ce qui empêche la règle de revenir
-  par une cinquième porte, sans que personne ne s'en aperçoive avant le prochain rôle créé.
-
-  `u.roles` subsiste — pour l'affichage, le journal d'audit et les écrans d'administration. C'est
-  une donnée, plus une décision.
+  `u.roles` subsiste pour l'affichage, l'audit et l'administration — une donnée, pas une décision.
 */
 
-/**
- * ⚠️ N'EXIGE QUE LES PERMISSIONS, pas un `UtilisateurAutorise` complet.
- *
- * Deux services construisent une photographie d'autorisation partielle pour poser une question de
- * cloisonnement (voir `PourCloisonnement`). Exiger le type entier les obligeait à inventer une
- * valeur pour chaque champ hors sujet, et une valeur inventée se lit comme une vérité partout où
- * l'objet circule ensuite.
- */
+/** N'exige que les permissions : voir `PourCloisonnement` pour la raison. */
 export function aPermission(
   u: { readonly permissions: ReadonlySet<Permission> },
   permission: Permission
@@ -127,14 +84,10 @@ export function aUnePermissionParmi(
 /**
  * Charge rôles et permissions effectives d'un utilisateur.
  *
- * Reproduit la résolution de spatie : permissions héritées des rôles UNION permissions
- * accordées directement à l'utilisateur (`model_has_permissions`). Cette seconde table est
- * vide aujourd'hui, mais le schéma l'autorise — l'ignorer ferait diverger silencieusement les
- * deux applications le jour où une permission directe serait accordée.
+ * Permissions héritées des rôles, UNION celles accordées directement au compte
+ * (`model_has_permissions`, vide aujourd'hui mais permise par le schéma).
  *
- * ⚠️ Une permission accordée DIRECTEMENT à un compte ne transite par aucun rôle : désactiver un
- * rôle ne la retire donc pas. C'est cohérent — elle n'a jamais été conférée par lui — mais il
- * faut le savoir avant de compter sur la désactivation pour couper un accès.
+ * ⚠️ Une permission directe ne transite par aucun rôle : désactiver un rôle ne la retire pas.
  *
  * Retourne `null` si l'utilisateur n'existe pas.
  */
@@ -163,7 +116,6 @@ export async function chargerUtilisateurAutorise(userId: bigint): Promise<Utilis
         roles: {
           select: {
             name: true,
-            guard_name: true,
             actif: true,
             // Ce rôle a-t-il la CHARGE des dossiers ? Paramétré dans les habilitations, jamais
             // déduit d'une permission — voir `traiteLesDossiers`.
@@ -172,7 +124,7 @@ export async function chargerUtilisateurAutorise(userId: bigint): Promise<Utilis
             cloisonne_par_rattachement: true,
             voit_seulement_ses_declarations: true,
             voit_identite_declarant: true,
-            role_has_permissions: { select: { permissions: { select: { name: true, guard_name: true } } } },
+            role_has_permissions: { select: { permissions: { select: { name: true } } } },
             role_etapes: {
               select: {
                 parcours: { select: { code: true } },
@@ -185,30 +137,20 @@ export async function chargerUtilisateurAutorise(userId: bigint): Promise<Utilis
     }),
     prisma.model_has_permissions.findMany({
       where: { model_type: MODEL_TYPE_USER, model_id: userId },
-      select: { permissions: { select: { name: true, guard_name: true } } },
+      select: { permissions: { select: { name: true } } },
     }),
     /*
-      Les parcours ouverts par ses RÔLES. Relus ici à chaque requête, comme les rôles et les
-      permissions : une case décochée dans les habilitations coupe l'accès tout de suite, sans
-      attendre une reconnexion.
+      Parcours ouverts par ses rôles. Les deux filtres comptent : un type désactivé en base ne
+      s'ouvre à personne, et un rôle éteint ne confère rien — sinon sa désactivation ne serait
+      qu'à moitié effective.
 
-      ⚠️ TROIS FILTRES, ET LES TROIS COMPTENT :
-
-        - `parcours.actif` : un type de déclaration désactivé en base ne s'ouvre à personne, quelles
-          que soient les cases cochées.
-        - `roles.actif` : un rôle éteint ne confère rien — même règle que pour ses permissions, et
-          la contourner ici rendrait la désactivation d'un rôle à moitié effective.
-        - `guard_name` : la garde de spatie, comme partout ailleurs.
-
-      ⚠️ `utilisateur_parcours` N'EST PLUS LUE. L'attribution par personne ne décide plus rien
-      (décision métier du 2026-09-20) ; la table subsiste, elle porte l'ancien paramétrage.
+      `utilisateur_parcours` n'est plus lue : l'attribution par personne ne décide plus rien.
     */
     prisma.role_parcours.findMany({
       where: {
         parcours: { actif: true },
         roles: {
           actif: true,
-          guard_name: GUARD,
           model_has_roles: { some: { model_type: MODEL_TYPE_USER, model_id: userId } },
         },
       },
@@ -219,14 +161,8 @@ export async function chargerUtilisateurAutorise(userId: bigint): Promise<Utilis
   const roles: Role[] = []
   const permissions = new Set<Permission>()
   let traiteLesDossiers = false
-  /*
-    ⚠️ UN RÔLE À LA FOIS, puis la règle au bout — et non un drapeau levé au premier rôle cloisonné.
-
-    « Cumuler n'est pas être deux fois restreint, c'est porter un mandat plus large » : le compte
-    n'est borné que si TOUS ses rôles porteurs d'accès le prévoient. Un `||` accumulé ici aurait
-    retiré à un compte cumulant deux rôles ce que le second lui donnait le droit de voir, sans
-    erreur et sans message. Voir `cloisonnePourSesRoles()`.
-  */
+  // ⚠️ Un rôle à la fois, la règle au bout : le compte n'est borné que si TOUS ses rôles porteurs
+  // le prévoient. Un `||` accumulé ici masquerait ce qu'un second rôle donne le droit de voir.
   const cloisonnementParRole: { cloisonne: boolean; donneAcces: boolean }[] = []
   let voitSeulementSesDeclarations = false
   // Vrai par défaut : c'est le retrait qui se décide, rôle par rôle.
@@ -234,18 +170,8 @@ export async function chargerUtilisateurAutorise(userId: bigint): Promise<Utilis
   const etapes: { parcours: string; statut: string }[] = []
 
   for (const lien of liensRoles) {
-    if (lien.roles.guard_name !== GUARD) continue
-
-    // Un rôle désactivé ne confère RIEN — ni permission, ni parcours.
-    //
-    // C'est ici que la désactivation prend son sens, et nulle part ailleurs : masquer le rôle
-    // dans les écrans d'administration n'en retirerait aucun droit, et un compte qui le porte
-    // continuerait d'accéder à tout. L'association `model_has_roles` est conservée : réactiver
-    // le rôle rend leurs droits à ceux qui le portaient, sans avoir à les réattribuer un par un.
-    //
-    // Le rôle est aussi retiré de `roles`, pas seulement ses permissions : `parcoursAutorises()`
-    // et `aRole()` s'appuient dessus, et un rôle éteint qui continuerait d'ouvrir un parcours
-    // serait le pire des deux mondes.
+    // Un rôle désactivé ne confère RIEN — ni permission, ni parcours — et disparaît de `roles`.
+    // L'association est conservée en base : le réactiver rend leurs droits à ses porteurs.
     if (!lien.roles.actif) continue
 
     roles.push(lien.roles.name as Role)
@@ -256,9 +182,7 @@ export async function chargerUtilisateurAutorise(userId: bigint): Promise<Utilis
     cloisonnementParRole.push({
       cloisonne: lien.roles.cloisonne_par_rattachement,
       donneAcces: donneAccesAuxDossiers(
-        lien.roles.role_has_permissions
-          .filter((rhp) => rhp.permissions.guard_name === GUARD)
-          .map((rhp) => rhp.permissions.name)
+        lien.roles.role_has_permissions.map((rhp) => rhp.permissions.name)
       ),
     })
 
@@ -272,49 +196,26 @@ export async function chargerUtilisateurAutorise(userId: bigint): Promise<Utilis
     }
 
     for (const rhp of lien.roles.role_has_permissions) {
-      if (rhp.permissions.guard_name === GUARD) {
-        permissions.add(rhp.permissions.name as Permission)
-      }
+      permissions.add(rhp.permissions.name as Permission)
     }
   }
 
   for (const directe of permissionsDirectes) {
-    if (directe.permissions.guard_name === GUARD) {
-      permissions.add(directe.permissions.name as Permission)
-    }
+    permissions.add(directe.permissions.name as Permission)
   }
 
   return {
     id: utilisateur.id,
     actif: utilisateur.actif,
-    /*
-      ⚠️ LE SITE EST DÉDUIT de la direction quand le compte n'en porte pas directement.
-
-      Un compte se rattache à un site OU à une direction, jamais aux deux. Sans cette déduction,
-      celui qui choisit une direction n'aurait AUCUN site — et `siteCloisonnant()`, qui rend
-      `null` dans ce cas, cesserait de le borner : il verrait les dossiers de tous les sites. Un
-      cloisonnement qui s'efface parce qu'on a renseigné un rattachement PLUS précis serait
-      l'inverse de ce qu'on attend.
-
-      Une direction appartient toujours à un site (`directions.site_id`), et c'est par elle que
-      les dossiers trouvent le leur : la déduction ne fabrique rien, elle suit le même chemin.
-
-      ⚠️ CE SITE DÉDUIT NE SERT PLUS QUE DE FILET. Depuis que `directionId` est porté, un compte
-      rattaché à une direction est borné PAR SA DIRECTION, et `siteCloisonnant()` s'efface devant
-      elle. La déduction reste parce qu'elle décrit une vérité — la direction appartient bien à ce
-      site — et qu'elle continue de borner les rares comptes dont la direction serait retirée sans
-      que le site le soit.
-    */
+    // Site déduit de la direction quand le compte n'en porte pas : sans cela, un compte rattaché
+    // à une direction n'aurait aucun site et cesserait d'être borné. Sert de filet depuis que
+    // `directionId` borne directement.
     siteId: utilisateur.site_id ?? utilisateur.directions?.site_id ?? null,
     directionId: utilisateur.direction_id,
     doitChangerMotDePasse: utilisateur.doit_changer_mot_de_passe,
     roles,
     permissions,
-    /*
-      ⚠️ DÉDUPLIQUÉ. Deux rôles peuvent ouvrir le même type de déclaration — un correspondant qui
-      est aussi responsable de structure —, et la requête rend alors deux lignes. Sans ce `Set`,
-      l'écran des comptes afficherait « Grief employé · Grief employé ».
-    */
+    // Dédupliqué : deux rôles peuvent ouvrir le même type, et la requête rend alors deux lignes.
     parcours: [...new Set(liensParcours.map((lien) => lien.parcours.code as ParcoursCode))],
     traiteLesDossiers,
     cloisonneParRattachement: cloisonnePourSesRoles(cloisonnementParRole),
