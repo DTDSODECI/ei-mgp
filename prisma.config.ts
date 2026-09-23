@@ -1,8 +1,12 @@
+import { existsSync } from 'node:fs'
 import { defineConfig, env } from 'prisma/config'
 
-// Prisma 7 ne charge plus automatiquement le fichier .env : on le fait explicitement.
-// `process.loadEnvFile` est natif depuis Node 20.12 — inutile d'ajouter dotenv.
-process.loadEnvFile()
+// En local, Prisma charge le fichier .env s'il existe.
+// Sur Netlify, les variables sont injectées directement dans l'environnement,
+// donc l'absence de .env ne doit pas faire échouer le build.
+if (existsSync('.env')) {
+  process.loadEnvFile()
+}
 
 /**
  * Prisma 7 : l'URL de connexion ne vit plus dans `schema.prisma` (le champ `datasource.url`
