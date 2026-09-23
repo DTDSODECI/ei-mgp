@@ -51,40 +51,11 @@ function lireEvolutions(): Evolution[] {
     })
 }
 
-/**
- * Exécute une évolution.
- *
- * ⚠️ INSTRUCTION PAR INSTRUCTION QUAND LE FICHIER N'A PAS DE TRANSACTION. `CREATE INDEX
- * CONCURRENTLY` ne peut pas s'exécuter dans un bloc transactionnel : PostgreSQL refuse l'ordre.
- * `2026-09-22-index-cles-etrangeres.sql` n'a donc ni BEGIN ni COMMIT, et l'envoyer d'un seul coup
- * place le serveur en transaction implicite — la première ligne échoue.
- *
- * Les fichiers qui portent leur propre BEGIN/COMMIT partent entiers : les découper romprait
- * l'atomicité qu'ils demandent explicitement.
- */
-async function executer(prisma: PrismaClient, evolution: Evolution): Promise<void> {
-  // Les anciens fichiers SQL utilisent des noms de tables sans schéma.
-  // Ils doivent être adaptés et validés avant tout rejeu sur l'instance Supabase partagée.
+/** Les anciennes évolutions ne doivent pas s'exécuter dans le mauvais schéma. */
+async function executer(_prisma: PrismaClient, evolution: Evolution): Promise<void> {
+  // Les fichiers SQL utilisent des noms de tables sans schéma. Les qualifier et les valider
+  // individuellement avant toute nouvelle migration sur l'instance Supabase partagée.
   throw new Error(`Évolution ${evolution.fichier} non qualifiée : migration manuelle dans ei_mgp requise.`)
-
-  const transactionnel = /^\s*BEGIN\s*;/im.test(evolution.sql)
-
-  if (transactionnel) {
-    await prisma.$executeRawUnsafe(evolution.sql)
-    return
-  }
-
-  const instructions = evolution.sql
-    .split('\n')
-    .filter((l) => !l.trim().startsWith('--'))
-    .join('\n')
-    .split(';')
-    .map((s) => s.trim())
-    .filter(Boolean)
-
-  for (const instruction of instructions) {
-    await prisma.$executeRawUnsafe(instruction)
-  }
 }
 
 type Appliquee = { fichier: string; empreinte: string; rang: number }
