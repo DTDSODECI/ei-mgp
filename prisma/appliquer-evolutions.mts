@@ -63,6 +63,10 @@ function lireEvolutions(): Evolution[] {
  * l'atomicité qu'ils demandent explicitement.
  */
 async function executer(prisma: PrismaClient, evolution: Evolution): Promise<void> {
+  // Les anciens fichiers SQL utilisent des noms de tables sans schéma.
+  // Ils doivent être adaptés et validés avant tout rejeu sur l'instance Supabase partagée.
+  throw new Error(`Évolution ${evolution.fichier} non qualifiée : migration manuelle dans ei_mgp requise.`)
+
   const transactionnel = /^\s*BEGIN\s*;/im.test(evolution.sql)
 
   if (transactionnel) {
@@ -88,7 +92,7 @@ type Appliquee = { fichier: string; empreinte: string; rang: number }
 async function dejaAppliquees(prisma: PrismaClient): Promise<Appliquee[] | null> {
   try {
     return await prisma.$queryRaw<Appliquee[]>`
-      SELECT fichier, empreinte, rang FROM evolutions_appliquees ORDER BY rang`
+      SELECT fichier, empreinte, rang FROM ei_mgp.evolutions_appliquees ORDER BY rang`
   } catch {
     // La table n'existe pas : cette base n'a pas encore reçu l'évolution qui la crée.
     return null
@@ -104,7 +108,7 @@ async function principal(): Promise<void> {
   const appliquer = process.argv.includes('--appliquer')
   const adopter = process.argv.includes('--adopter')
 
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: url }) })
+  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: url }, { schema: 'ei_mgp' }) })
 
   try {
     const evolutions = lireEvolutions()
@@ -120,7 +124,7 @@ async function principal(): Promise<void> {
     */
     const tables = await prisma.$queryRaw<{ n: bigint }[]>`
       SELECT count(*) AS n FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
+      WHERE table_schema = 'ei_mgp' AND table_type = 'BASE TABLE'`
 
     if (Number(tables[0]?.n ?? 0) === 0) {
       console.error(
@@ -203,7 +207,7 @@ async function principal(): Promise<void> {
       }
 
       await prisma.$executeRaw`
-        INSERT INTO evolutions_appliquees (fichier, empreinte, rang)
+        INSERT INTO ei_mgp.evolutions_appliquees (fichier, empreinte, rang)
         VALUES (${evolution.fichier}, ${evolution.empreinte}, ${rang})`
     }
 
