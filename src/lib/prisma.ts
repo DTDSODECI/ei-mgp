@@ -29,8 +29,24 @@ function creerClient(): PrismaClient {
   })
 }
 
-export const prisma = globalForPrisma.prisma ?? creerClient()
+let client: PrismaClient | undefined
 
-if (process.env.NODE_ENV !== 'production') {
-  globalForPrisma.prisma = prisma
+function obtenirClient(): PrismaClient {
+  client ??= globalForPrisma.prisma ?? creerClient()
+
+  if (process.env.NODE_ENV !== 'production') {
+    globalForPrisma.prisma = client
+  }
+
+  return client
 }
+
+// Next.js importe les routes pendant le build. La base n'est nécessaire qu'à la première
+// opération Prisma : conserver le contrôle DATABASE_URL dans creerClient(), à ce moment-là.
+export const prisma = new Proxy({} as PrismaClient, {
+  get(_cible, propriete) {
+    const instance = obtenirClient()
+    const valeur = Reflect.get(instance, propriete, instance)
+    return typeof valeur === 'function' ? valeur.bind(instance) : valeur
+  },
+})
