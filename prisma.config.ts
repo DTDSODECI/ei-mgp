@@ -12,9 +12,9 @@ if (existsSync('.env')) {
  * Prisma 7 : l'URL de connexion ne vit plus dans `schema.prisma` (le champ `datasource.url`
  * y est refusé) mais ici.
  *
- * Cette configuration pointe vers la base RÉELLE, partagée avec l'application Laravel encore
- * en service pendant la migration. Seule `prisma db pull` (lecture seule) doit être exécutée :
- * jamais `migrate dev`, `migrate reset` ni `db push`.
+ * Cette configuration cible le schéma privé `ei_mgp` de la base Supabase partagée.
+ * Seule `prisma db pull` (lecture seule) doit être exécutée : jamais `migrate dev`,
+ * `migrate reset` ni `db push` sur cette instance.
  */
 const databaseUrl =
   process.env.DATABASE_URL ?? 'postgresql://prisma:prisma@localhost:5432/prisma'

@@ -49,7 +49,7 @@ npm run dev               # http://localhost:3000
 
 ### Recréer un environnement
 
-Sur une base vierge :
+Sur une base vierge, dans le schéma privé `ei_mgp` :
 
 ```bash
 psql "$DATABASE_URL" -f prisma/structure.sql   # 37 tables, contraintes et commentaires
@@ -69,7 +69,7 @@ lorsqu'un référentiel modifié depuis l'application doit être versionné.
 
 | Variable | Rôle | Sans elle |
 |---|---|---|
-| `DATABASE_URL` | Connexion PostgreSQL | L'application ne démarre pas |
+| `DATABASE_URL` | Connexion PostgreSQL Supabase avec le rôle `ei_mgp_app` (pooler transactionnel sur Netlify) | Les fonctions qui lisent la base échouent |
 | `AUTH_SECRET` | Signature des sessions Auth.js **et** du jeton de suivi déclarant | Connexion et suivi impossibles |
 | `AUTH_URL` | URL publique de l'application | Auth.js refuse l'hôte (`UntrustedHost`) |
 | `TACHES_SECRET` | Secret du déclencheur de tâches planifiées, **32 caractères minimum** | Les tâches renvoient 503 : aucune relance, aucune escalade, aucune anonymisation |
@@ -79,9 +79,10 @@ lorsqu'un référentiel modifié depuis l'application doit être versionné.
 | `MAIL_HOST`, `MAIL_FROM` | Transport SMTP — **les deux sont requis** pour expédier | Les e-mails sont journalisés, pas envoyés |
 | `MAIL_PORT`, `MAIL_SECURE`, `MAIL_USER`, `MAIL_PASSWORD` | Réglages SMTP complémentaires | Port 587 en STARTTLS, sans authentification |
 
-Comptes de démonstration présents dans la base de développement : `admin@`, `gestionnaire@`,
-`superviseur@`, `enqueteur@`, `direction@`, `auditeur@` — tous en `@example.test`, mot de passe
-`password`. **À supprimer avant toute mise en service.**
+Les six comptes de démonstration `@example.test` et leurs liens de rôles et de parcours ont été
+conservés lors de la reprise. Leurs mots de passe issus de la base source sont connus des
+utilisateurs de la démonstration : les remplacer avant d'ouvrir l'accès public, sans supprimer
+les comptes ni leurs associations.
 
 ---
 
@@ -95,7 +96,7 @@ Comptes de démonstration présents dans la base de développement : `admin@`, `
 | `npm run lint` | ESLint |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | Suite Vitest — plus de 800 tests, contre la base réelle |
-| `npm run db:evolutions` | Ce qui manque à cette base ; `-- --appliquer` pour l'appliquer |
+| `npm run db:evolutions` | Ce qui manque à `ei_mgp` ; tout nouveau SQL non qualifié est refusé avant application |
 | `npm run db:pull` | Réintrospecte `schema.prisma` depuis la base |
 | `npm run db:structure` | Régénère `prisma/structure.sql` — après toute évolution |
 | `npm run seed` | Rejoue les référentiels, idempotent |
